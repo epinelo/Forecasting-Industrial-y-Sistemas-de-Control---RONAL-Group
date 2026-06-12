@@ -1,161 +1,186 @@
-# Forecasting Industrial y Sistemas de Control — RONAL Group
+# Modelado y Control del Horno Fusor — RONAL Group
 
-Modelado y control de la temperatura del **horno fusor de aluminio** de RONAL Group.
-El proyecto combina dos enfoques complementarios:
+Este proyecto modela y controla la **temperatura de un horno fusor de aluminio**
+de RONAL Group, usado en la fabricación de rines por colada a baja presión (LPDC).
 
-1. **Predictor de la dinámica térmica** basado en *Deep Learning* (CNN + LSTM), que
-   aprende a estimar la temperatura del horno a partir de las variables de proceso.
-2. **Modelo de control moderno** en espacio de estados, identificado a partir del
-   predictor neuronal mediante un ajuste ARX, listo para diseñar un controlador.
+El objetivo es sencillo: lograr que la temperatura del baño de aluminio se mantenga
+estable en su valor deseado (**780 °C**), incluso cuando el proceso cambia.
+
+Para lograrlo combinamos **dos enfoques** que se complementan:
+
+1. **Modelo de control (caja blanca):** un modelo físico del horno, hecho en Simulink,
+   con un controlador que garantiza estabilidad.
+2. **Modelo de Deep Learning (caja negra):** una red neuronal (CNN + LSTM) que aprende
+   la dinámica real del horno a partir de los datos medidos.
+
+Al final, la red neuronal se convierte en un modelo lineal (ARX → espacio de estados)
+para poder analizarlo y diseñar controladores con herramientas clásicas.
 
 Reto **MA2008B** — Equipo 2 — ITESM Campus Querétaro.
 
 ---
 
-## El problema
+## El problema en pocas palabras
 
-El horno se monitorea con un termopar (`sensor_temp`) muestreado cada **20 s**
-(3 muestras/min). El objetivo es modelar cómo evoluciona la temperatura en función
-de **6 variables de proceso controlables/medibles** y obtener un modelo de planta
-útil para control.
+El horno tiene un sensor de temperatura (`sensor_temp`) que mide cada **20 segundos**.
+Queremos predecir y controlar esa temperatura a partir de **6 variables de proceso**
+que sí podemos medir o ajustar:
 
-| Variable | Rol |
-|---|---|
-| `gas_flow`, `air_flow`, `furnace_load`, `ambient_temp`, `gas_pressure`, `energy_consumption` | **Entradas** del sistema (las *u*) |
-| `sensor_temp` | **Salida** a predecir / controlar (la *y*) |
+| Variable | Qué es | Rol |
+|---|---|---|
+| `gas_flow` | Flujo de gas natural | Entrada |
+| `air_flow` | Flujo de aire | Entrada |
+| `furnace_load` | Carga del horno | Entrada |
+| `ambient_temp` | Temperatura ambiente | Entrada |
+| `gas_pressure` | Presión del gas | Entrada |
+| `energy_consumption` | Consumo de energía | Entrada |
+| `sensor_temp` | **Temperatura del baño** | Salida (lo que predecimos) |
 
-> El modelo predice la temperatura **absoluta** usando *únicamente* las 6 variables
-> de proceso. `sensor_temp` **no** es entrada del predictor, lo que evita *data
-> leakage*. El `StandardScaler` se ajusta **solo con la partición de entrenamiento**.
+> **Importante:** la red predice la temperatura usando *solo* esas 6 variables.
+> Nunca usa la temperatura pasada como entrada, así que no hay "trampa" (*data leakage*).
+> Además, el escalado de datos se ajusta **solo con los datos de entrenamiento**.
 
 ---
 
-## Arquitectura del pipeline
+## ¿Cómo funciona? (el flujo de trabajo)
 
 ```
-CSV crudo
-   │  preprocessing.py   (limpieza: timestamps, códigos de error, interpolación)
-   ▼
-CSV limpio
-   │  train.py           (ventanas deslizantes → CNN+LSTM → checkpoint .pth)
-   ▼
-models/cnn_lstm_checkpoint.pth
-   │
-   ├─ evaluate.py            → métricas (MAE, RMSE, R²) + figuras
-   │
-   └─ nn_to_state_space.py   (NN como simulador → ARX por AIC → espacio de estados)
-          ▼
-   models/espacio_estados.npz   → matrices A, B, C, D para diseño de controlador
+  dataset crudo (CSV)
+        │
+        │   1. preprocessing.py   → limpia los datos
+        ▼
+  dataset limpio (CSV)
+        │
+        │   2. train.py          → entrena la red CNN+LSTM
+        ▼
+  modelo entrenado (.pth)
+        │
+        ├── 3. evaluate.py          → mide qué tan bien predice (MAE, RMSE, R²)
+        │
+        └── 4. nn_to_state_space.py → convierte la red en matrices A, B, C, D
+                                       (modelo de espacio de estados para control)
 ```
 
-Todos los scripts comparten una **única fuente de verdad** ([config.py](config.py))
-para rutas e hiperparámetros, y se inicializan con [repro.py](repro.py) para que el
-pipeline completo sea **reproducible** (semilla global, modo determinista de PyTorch).
+Todos los scripts leen su configuración de un solo archivo, [config.py](config.py),
+y usan [repro.py](repro.py) para fijar las semillas aleatorias. Así, **cualquiera que
+ejecute el proyecto obtiene los mismos resultados**.
 
 ---
 
-## Estructura del repositorio
+## Cómo usarlo
 
-| Archivo | Descripción |
-|---|---|
-| [config.py](config.py) | Rutas, variables de proceso e hiperparámetros (única fuente de verdad). |
-| [repro.py](repro.py) | Fija semillas y fuerza determinismo en PyTorch. |
-| [preprocessing.py](preprocessing.py) | Limpieza del CSV crudo → CSV limpio. |
-| [dataset.py](dataset.py) | Carga, escalado sin *leakage*, ventanas deslizantes y particiones temporales. |
-| [model.py](model.py) | Arquitectura `CNN_LSTM` y carga/guardado robusto del checkpoint. |
-| [train.py](train.py) | Entrenamiento del predictor CNN+LSTM. |
-| [evaluate.py](evaluate.py) | Evaluación en *test* + generación de gráficas. |
-| [nn_to_state_space.py](nn_to_state_space.py) | Identificación del modelo en espacio de estados (ARX). |
-| [EDA_Horno_Fusor.ipynb](EDA_Horno_Fusor.ipynb) | Análisis exploratorio de datos. |
-| [Modelo_final.slx](Modelo_final.slx) | Modelo de Simulink del sistema de control. |
-| `dataset_horno_fusor1.csv` | Datos crudos del horno (21 600 muestras). |
-| `dataset_horno_fusor_cleaned.csv` | Datos limpios (generados por `preprocessing.py`). |
-| `models/cnn_lstm_checkpoint.pth` | Pesos y escaladores del modelo entrenado. |
-| `models/espacio_estados.npz` | Matrices A, B, C, D del modelo en espacio de estados. |
-| `figures/` | Gráficas generadas por los scripts de evaluación. |
-
----
-
-## Instalación
-
-Requiere **Python 3.10+**.
+**1. Instalar dependencias** (necesitas Python 3.10 o superior):
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Dependencias principales: `numpy`, `pandas`, `scipy`, `scikit-learn`, `matplotlib`,
-`torch`. El pipeline corre en **CPU**; usa GPU automáticamente si hay CUDA disponible.
-
----
-
-## Uso
-
-Ejecuta los scripts desde la raíz del repositorio, en orden:
+**2. Ejecutar los scripts en orden** desde la carpeta del proyecto:
 
 ```bash
-# 1) Limpieza de datos  →  dataset_horno_fusor_cleaned.csv
-python preprocessing.py
-
-# 2) Entrenamiento del predictor  →  models/cnn_lstm_checkpoint.pth
-python train.py
-
-# 3) Evaluación + gráficas  →  figures/pred_vs_real.png, figures/error_absoluto.png
-python evaluate.py
-
-# 4) Identificación en espacio de estados  →  models/espacio_estados.npz
-python nn_to_state_space.py
+python preprocessing.py      # limpia los datos
+python train.py              # entrena la red (opcional: ya viene entrenada)
+python evaluate.py           # evalúa y genera gráficas
+python nn_to_state_space.py  # genera el modelo de espacio de estados
 ```
 
-El repositorio ya incluye el checkpoint y las matrices entrenadas, así que puedes
-ejecutar directamente `evaluate.py` o `nn_to_state_space.py` sin reentrenar.
-Si el CSV limpio no existe, `dataset.py` lo genera automáticamente.
+> El repositorio **ya incluye** el modelo entrenado y las matrices del espacio de
+> estados. Si solo quieres ver resultados, puedes correr directamente `evaluate.py`
+> o `nn_to_state_space.py` sin reentrenar nada.
 
 ---
 
-## Detalles técnicos
+## Resultados
 
-### Limpieza de datos ([preprocessing.py](preprocessing.py))
-- Reconstrucción del *timestamp* real (una muestra cada 20 s).
-- Reemplazo de los códigos de error del termopar (`544.823`, `1003.413`) por `NaN`.
-- Interpolación lineal de los huecos resultantes en `sensor_temp`.
+**Predicción de la red (CNN + LSTM)**, sobre datos que nunca vio:
 
-### Modelo predictor ([model.py](model.py))
-- **CNN 1D** (2 capas convolucionales + ReLU + *dropout*) sobre la dimensión temporal,
-  seguida de un **LSTM** apilado (2 capas) y una cabeza lineal.
-- Ventana de **200 pasos**, horizonte de **1 paso**.
-- Pérdida `SmoothL1Loss`, optimizador `Adam`, *scheduler* `ReduceLROnPlateau`,
-  *gradient clipping*.
-- Particiones **temporales** (no aleatorias): train 70 % / val 15 % / test 15 %.
-- El *loader* **infiere la arquitectura desde los pesos**, no de metadatos externos,
-  garantizando que el checkpoint siempre sea coherente.
+| Métrica | Valor | Qué significa |
+|---|---|---|
+| MAE | **1.83 °C** | error promedio (~0.23 % del setpoint) |
+| RMSE | 5.20 °C | error que penaliza más los picos grandes |
 
-### Identificación en espacio de estados ([nn_to_state_space.py](nn_to_state_space.py))
-El CNN+LSTM se usa como **simulador**: deslizando ventanas de entradas reales se
-generan pares (U, Y), se ajusta un **ARX por mínimos cuadrados** (orden elegido por
-**AIC**) y se convierte a una realización discreta en forma compañera:
+> En operación normal el error es de menos de 2 °C. El RMSE sube porque hay unos
+> pocos picos bruscos (eventos de carga) que la red, a propósito, no persigue:
+> actúa como un simulador suave de la planta.
+
+**Conversión a espacio de estados (ARX):**
+
+| Resultado | Valor |
+|---|---|
+| Orden elegido (por criterio AIC) | n = 7 |
+| Ajuste del ARX a la red (R²) | 0.986 |
+| Diferencia ARX vs red | RMSE = 2.13 °C |
+| Estabilidad | Estable (todos los polos con \|λ\| < 1) |
+
+Las gráficas se guardan en [figures/](figures/):
+
+- `pred_vs_real.png` — predicción de la red vs. temperatura real.
+- `error_absoluto.png` — error a lo largo del conjunto de prueba.
+- `verificacion_arx_ss.png` — modelo de espacio de estados vs. red neuronal.
+- `Comparación control vs deep.jpeg` — comparación de ambos enfoques.
+
+---
+
+## Modelo de control (Simulink)
+
+En la carpeta [Modelo control/](Modelo%20control/) está el modelo de control moderno:
+
+- `Simulink_ronal.slx` — el modelo de control en Simulink.
+- `ARX_PREDICCION.mat`, `sim1.mat` — datos de simulación.
+
+Usa el modelo de espacio de estados (`models/espacio_estados.npz`) para diseñar un
+controlador por **realimentación de estados** con un **observador**, sintonizado con
+la **fórmula de Ackermann** (ubicación de polos).
+
+---
+
+## Qué hay en cada archivo
+
+| Archivo | Para qué sirve |
+|---|---|
+| [config.py](config.py) | Toda la configuración: rutas, variables e hiperparámetros. |
+| [repro.py](repro.py) | Fija las semillas para que todo sea reproducible. |
+| [preprocessing.py](preprocessing.py) | Limpia el CSV crudo (errores del sensor, huecos, fechas). |
+| [dataset.py](dataset.py) | Arma las ventanas de datos y las particiones de tiempo. |
+| [model.py](model.py) | Define la arquitectura de la red CNN + LSTM. |
+| [train.py](train.py) | Entrena la red. |
+| [evaluate.py](evaluate.py) | Evalúa la red y genera gráficas. |
+| [nn_to_state_space.py](nn_to_state_space.py) | Convierte la red en un modelo de espacio de estados. |
+| [EDA_Horno_Fusor.ipynb](EDA_Horno_Fusor.ipynb) | Análisis exploratorio de los datos. |
+| `dataset_horno_fusor1.csv` | Datos crudos del horno (21 600 muestras). |
+| `dataset_horno_fusor_cleaned.csv` | Datos ya limpios. |
+| `models/` | Modelo entrenado (`.pth`) y matrices del espacio de estados (`.npz`). |
+| `figures/` | Gráficas de resultados. |
+| `Modelo control/` | Modelo de Simulink y datos de simulación. |
+
+---
+
+## Detalles técnicos (para quien quiera profundizar)
+
+**Limpieza de datos** ([preprocessing.py](preprocessing.py)):
+reconstruye la fecha real (una muestra cada 20 s), reemplaza los códigos de error del
+sensor (544.823 y 1003.413) por valores faltantes, y rellena los huecos por
+interpolación lineal.
+
+**La red CNN + LSTM** ([model.py](model.py)):
+dos capas convolucionales 1D (que detectan patrones entre las variables) seguidas de
+un LSTM de 2 capas (que recuerda la historia térmica). Usa una ventana de **200 pasos**
+(≈ 67 minutos) para predecir el siguiente paso. Se entrena con `SmoothL1Loss`, optimizador
+`Adam` y *gradient clipping*. Las particiones son **temporales** (no aleatorias):
+70 % entrenamiento, 15 % validación, 15 % prueba.
+
+**Espacio de estados** ([nn_to_state_space.py](nn_to_state_space.py)):
+la red se usa como simulador para generar pares entrada-salida limpios. Sobre ellos se
+ajusta un modelo ARX por mínimos cuadrados (el orden se elige con el criterio AIC) y se
+convierte a una realización discreta:
 
 ```
 x(k+1) = Ad·x(k) + Bd·u(k)
 y(k)   = Cd·x(k) + Dd·u(k)
 ```
 
-Se verifica **estabilidad** (|λ| < 1) y el ajuste contra el predictor neuronal.
-Las matrices se guardan en `models/espacio_estados.npz` junto con los escaladores,
-listas para el diseño del controlador y para [Modelo_final.slx](Modelo_final.slx).
-
----
-
-## Resultados
-
-Las gráficas se regeneran al ejecutar los scripts y se guardan en [figures/](figures/):
-
-- `pred_vs_real.png` — predicción del CNN+LSTM vs. temperatura real (*test*).
-- `error_absoluto.png` — error absoluto a lo largo del conjunto de *test*.
-- `verificacion_arx_ss.png` — modelo en espacio de estados vs. predictor neuronal.
-
-`evaluate.py` imprime las métricas **RMSE**, **MAE** y **R²** en °C sobre el conjunto
-de prueba.
+Se verifica que sea estable y que reproduzca bien a la red. Las matrices se guardan en
+`models/espacio_estados.npz`, listas para diseñar el controlador.
 
 ---
 
